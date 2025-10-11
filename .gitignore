@@ -3,3 +3,19 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# PlatformIO build files
+.pio/
+.vscode/.browse.c_cpp.db*
+.vscode/.clangd/
+.vscode/.cquery_cached_index/
+
+# Logs and caches
+*.pyc
+__pycache__/
+.cache/
+.clangd/
+
+# OS junk
+.DS_Store
+Thumbs.db
