@@ -3,6 +3,8 @@
 #include <Adafruit_MCP23008.h>
 #include <TFT_eSPI.h>
 
+#include "ultrasonic.h"
+
 TFT_eSPI tft;
 
 Adafruit_MCP23008 mcp;
@@ -41,6 +43,8 @@ Adafruit_MCP23008 mcp;
 #define RIGHT_DIR_SIGN (+1)      // flip to -1 if needed
 #define SPEED 255
 
+#define US_THRESHOLD 50 // threshold before it stops scanning and drives forwards
+
 // TUNING
 int LEFT_SPEED_BASE = 250;
 int RIGHT_SPEED_BASE = 250;
@@ -49,13 +53,14 @@ int TURNR = 244;
 
 static inline int clamp255(int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); }
 
-void active_brake() {
+void active_brake()
+{
   ledcWrite(CH_B_IN1, 255);
-    ledcWrite(CH_B_IN2, 255);
+  ledcWrite(CH_B_IN2, 255);
 
-      ledcWrite(CH_A_IN1, 255);
-    ledcWrite(CH_A_IN2, 255);
-    delay(250);
+  ledcWrite(CH_A_IN1, 255);
+  ledcWrite(CH_A_IN2, 255);
+  delay(250);
 }
 
 // Motor control: speed in -255..+255 (forward positive, reverse negative)
@@ -180,8 +185,7 @@ void reverseBack()
 
 inline bool irTriggered(uint8_t pin)
 {
-  
-  
+
   int v = mcp.digitalRead(pin);
 #if IR_ACTIVE_LOW
   return (v == 0);
@@ -195,9 +199,10 @@ inline bool irTriggered(uint8_t pin)
 enum Action : uint8_t
 {
   ACT_IDLE = 0,
-  ACT_FRONT_PAUSE,     // STBY low briefly
-  ACT_FRONT_SPIN_180,  // timed spin in place
-  ACT_FRONT_ESCAPE_FWD // timed forward to get off black
+  ACT_FRONT_PAUSE,      // STBY low briefly
+  ACT_FRONT_SPIN_180,   // timed spin in place
+  ACT_FRONT_ESCAPE_FWD, // timed forward to get off black
+  ACT_ATTACK
 };
 
 static Action g_action = ACT_IDLE;
@@ -206,8 +211,9 @@ static uint32_t g_lastIRPoll = 0;
 
 // Timings
 #define STBY_PAUSE_MS 50
-#define FRONT_SPIN_MS 700   // you measured ~200 ms for 180°
-#define FRONT_ESCAPE_MS 700 // forward to clear the line
+#define FRONT_SPIN_MS 700      // you measured ~200 ms for 180°
+#define FRONT_ESCAPE_MS 700    // forward to clear the line
+#define US_SCANNING_MODE_MS 70 // basically controls how much it turns in scanning mode
 
 static inline bool anyFront()
 {
@@ -226,14 +232,14 @@ void ir_update_decision()
   g_lastIRPoll = now;
 
   if (g_action != ACT_IDLE)
-    return;
+   return;
 
   if (anyFront())
   {
     // FRONT: stop & pause driver, then we'll spin 180 and escape forward
     // setMotors(0,0);
-digitalWrite(PIN_STBY, HIGH);
-active_brake();
+    digitalWrite(PIN_STBY, HIGH);
+    active_brake();
 
     digitalWrite(PIN_STBY, LOW);
     g_action = ACT_FRONT_PAUSE;
@@ -279,6 +285,30 @@ void turn()
   ledcWrite(CH_A_IN1, SPEED);
 }
 
+// void scan_us()
+// {
+//   // Only adjust high-level mode from IDLE/SCAN; leave timed actions alone
+//   if (g_action != ACT_IDLE)
+//     return;
+
+//   if (us_f < US_THRESHOLD)
+//   {
+//     // target acquired -> attack
+//     g_action = ACT_ATTACK;
+//     g_actionUntil = 0;
+//   }
+//   else
+//   {
+//     // target lost -> scan (turn)
+//     if (g_action != ACT_IDLE)
+//     {
+//       g_action = ACT_IDLE;
+//       g_actionUntil = 0; // continuous until target or IR event
+//     }
+//   }
+// }
+
+
 void ir_run_action_or_cruise()
 {
   const uint32_t now = millis();
@@ -292,7 +322,7 @@ void ir_run_action_or_cruise()
       digitalWrite(PIN_STBY, HIGH); // re-enable driver
       // Start 180° spin: spin in place (left fwd, right rev). Direction doesn't matter.
       // Uses your base trims so both sides apply equally.
-      
+
       g_action = ACT_FRONT_SPIN_180;
       g_actionUntil = now + FRONT_SPIN_MS;
     }
@@ -306,13 +336,24 @@ void ir_run_action_or_cruise()
     // Spin in place: left forward, right reverse (or swap if you prefer the other way)
     // motorLeft(  LEFT_SPEED_BASE);
     // motorRight(RIGHT_SPEED_BASE);
+    
     turn();
+    // scan_us();
+    if (us_f < US_THRESHOLD) {
+        tft.fillScreen(TFT_GREEN);
+        g_action = ACT_ATTACK;
+      }
+
     if ((int32_t)(g_actionUntil - now) <= 0)
     {
       // After spin, drive forward to get off the black
       g_action = ACT_FRONT_ESCAPE_FWD;
       g_actionUntil = now + FRONT_ESCAPE_MS;
+      
     }
+    
+
+    
     return;
 
   case ACT_FRONT_ESCAPE_FWD:
@@ -325,10 +366,36 @@ void ir_run_action_or_cruise()
     }
     return;
 
-  case ACT_IDLE:
+    // case ACT_SCAN: // scanning mode - just turn
+    // turn();
+    //     if ((int32_t)(g_actionUntil - now) <= 0)
+    // {
+    //   // Done escaping → back to idle cruise
+    //   g_action = ACT_IDLE;
+    // }
+
+case ACT_ATTACK:
+    straight();
+    //scan_us();
+    if (us_f > US_THRESHOLD) {
+      g_action = ACT_IDLE;
+    }
+    return;
+
+  case ACT_IDLE: // aka, attacking mode
   default:
     // Normal cruise: go straight using base trims
     straight();
+    tft.fillScreen(TFT_WHITE);
+    if (us_f > US_THRESHOLD) {
+//       tft.fillScreen(TFT_WHITE);
+   }
+    
+    
+    // active_brake();
+    // delay(200);
+    // turn();
+    // scan_us();
     // setMotors(clamp255(-LEFT_SPEED_BASE), clamp255(-RIGHT_SPEED_BASE));
     return;
   }
@@ -435,6 +502,25 @@ void setup()
   ledcSetup(CH_B_IN2, PWM_FREQ, PWM_RES);
   ledcAttachPin(PIN_BIN2, CH_B_IN2);
 
+  // ultrasonics
+  pinMode(ECHO_F, INPUT);
+  pinMode(ECHO_FL, INPUT);
+  pinMode(ECHO_FR, INPUT);
+
+  pinMode(TRIG_F, OUTPUT);
+  pinMode(TRIG_FL, OUTPUT);
+  pinMode(TRIG_FR, OUTPUT);
+
+  xTaskCreatePinnedToCore(
+      ultrasonic_task,   // Task function
+      "ultrasonic_task", // Task name
+      4096,              // Stack size (bytes)
+      NULL,              // Parameters
+      1,                 // Priority
+      NULL,              // Task handle
+      1                  // Core 1
+  );
+
   // setMotors(0, 0);
 
   // Serial.println("IR+Motor test ready. Tuning LEFT_SPEED_BASE / RIGHT_SPEED_BASE.");
@@ -466,6 +552,7 @@ void loop()
   }
   ir_update_decision();
   ir_run_action_or_cruise(); // execute action (or cruise) without delays
+
   // no delay() here — everything is time-driven
 
   // test reverse symmetry:
